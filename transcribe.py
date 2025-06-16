@@ -2,36 +2,32 @@ import boto3  # AWS SDK for Python
 import whisper
 import os
 import argparse
-import sqlite3
+from dotenv import load_dotenv
+from pymongo import MongoClient
+from bson.objectid import ObjectId
 from datetime import datetime, UTC
 import time
 from transformers import pipeline
 
+load_dotenv()
+
+mongo_uri = os.getenv("MONGO_URI")
+
+client = MongoClient(mongo_uri)
+db = client["audio_transcriber"] 
+collection = db["transcripts"]
+
 summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
 
-def init_db():
-    conn = sqlite3.connect('transcriptions.db') #connects to the database
-    cursor = conn.cursor() #used to perform operations on the database 
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS transcripts (
-                   id INTEGER PRIMARY KEY AUTOINCREMENT,
-                   file_name TEXT NOT NULL,
-                   language TEXT,
-                   timestamp DATETIME,
-                   duration REAL,
-                   transcription TEXT
-                   )''')
-    conn.commit()
-    conn.close()
-
-def save_to_db(file_name, language, duration,transcription):
-    conn = sqlite3.connect('transcriptions.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-                   INSERT INTO transcripts (file_name, language, timestamp, duration, transcription)
-                   VAlUES(?,?,?,?,?)''',(file_name, language, datetime.now(UTC).isoformat(), duration, transcription))
-    conn.commit()
-    conn.close()
+def save_to_db(file_name, language, duration, transcription):
+    doc = {
+        "file_name": file_name,
+        "language": language,
+        "timestamp": datetime.now(UTC).isoformat(),
+        "duration": duration,
+        "transcription": transcription
+    }
+    collection.insert_one(doc)
 
 def download_from_s3(bucket_name, audio_key, local_audio):
     s3 = boto3.client('s3')   # creates an s3 client
@@ -52,12 +48,7 @@ def transcribe_audio(local_audio, local_transcript):
     print("Transcription complete and saved locally and stored in DB")
 
 def is_already_transcribed(file_name):
-    conn = sqlite3.connect('transcriptions.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT 1 FROM transcripts WHERE file_name = ?", (file_name,))
-    result = cursor.fetchone()
-    conn.close()
-    return result is not None
+    return collection.find_one({"file_name": file_name}) is not None
 
 def upload_to_s3(bucket_name, local_transcript, transcript_key):
     s3 = boto3.client("s3")
@@ -80,8 +71,6 @@ def main():
     parser.add_argument("--upload", action="store_true",help="Upload transcript to S3")
 
     args = parser.parse_args()
-
-    init_db()
 
     bucket_name = args.bucket
     if args.local_file and (args.bucket or args.audio_key):
