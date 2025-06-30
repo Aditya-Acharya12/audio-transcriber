@@ -1,6 +1,7 @@
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, util
 from pymongo import MongoClient
 import numpy as np
+import torch
 import os
 from dotenv import load_dotenv
 
@@ -13,31 +14,40 @@ chunk_collection = db["chunks"]
 
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
-def cosine_similarity(vec1, vec2):
-    vec1 = np.array(vec1)
-    vec2 = np.array(vec2)
-    return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
+def retrieve_and_rerank(query, top_k=3):
+    print(f"\nQuery: {query}\n")
 
-def retrieve_top_chunks(query, top_k=3):
+    # Embed the query
     query_embedding = model.encode(query)
 
-    similarities = []
+    # Retrieve all chunks with embeddings
+    chunks = list(chunk_collection.find({"embedding": {"$ne": None}}))
 
-    for doc in chunk_collection.find({"embedding": {"$ne": None}}):
-        chunk_embedding = doc["embedding"]
-        similarity = cosine_similarity(query_embedding, chunk_embedding)
-        similarities.append((similarity, doc))
+    if not chunks:
+        print("No chunks with embeddings found.")
+        return
 
-    # Sort by similarity descending
-    similarities.sort(key=lambda x: x[0], reverse=True)
+    # Compute cosine similarity between query and each chunk
+    scored_chunks = []
+    for chunk in chunks:
+        chunk_embedding = np.array(chunk["embedding"], dtype=np.float32)
+        score = util.cos_sim(
+            torch.tensor(query_embedding, dtype=torch.float32),
+            torch.tensor(chunk_embedding, dtype=torch.float32)
+        ).item()
+        scored_chunks.append((score, chunk))
 
-    print(f"\nTop {top_k} relevant chunks for your query:\n")
-    for i, (score, doc) in enumerate(similarities[:top_k]):
-        print(f"Rank {i+1} | Score: {score:.4f}")
-        print(f"File: {doc['file_name']}")
-        print(f"Chunk ID: {doc['chunk_id']}")
-        print(f"Text: {doc['text']}\n")
+    # Sort and get top-k results
+    scored_chunks.sort(key=lambda x: x[0], reverse=True)
+    top_chunks = scored_chunks[:top_k]
+
+    # Display results
+    for rank, (score, chunk) in enumerate(top_chunks, 1):
+        print(f"Rank {rank} | Score: {score:.4f}")
+        print(f"File: {chunk['file_name']}")
+        print(f"Chunk ID: {chunk['chunk_id']}")
+        print(f"Text: {chunk['text']}\n")
 
 if __name__ == "__main__":
-    user_query = input("Enter your question: ")
-    retrieve_top_chunks(user_query)
+    query = input("Enter your question: ")
+    retrieve_and_rerank(query)

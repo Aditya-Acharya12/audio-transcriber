@@ -1,43 +1,44 @@
 import nltk
-from nltk.tokenize import sent_tokenize
+from nltk.tokenize import word_tokenize
 from pymongo import MongoClient
-import uuid
 import os
 from dotenv import load_dotenv
+import hashlib
 
+# Setup
 load_dotenv()
-
 mongo_uri = os.getenv("MONGO_URI")
 
 client = MongoClient(mongo_uri)
 db = client["audio_transcriber"]
-source_collection = db["transcripts"]     # existing transcriptions
-chunk_collection = db["chunks"]           # target collection for chunks
+source_collection = db["transcripts"]
+chunk_collection = db["chunks"]
 
-def chunk_text(text, max_words=250):
-    sentences = sent_tokenize(text)
+# Download NLTK data
+nltk.download("punkt")
+
+def generate_chunk_id(text, file_name, index):
+    base = f"{file_name}_{index}_{hashlib.md5(text.encode()).hexdigest()[:8]}"
+    return base
+
+def chunk_text_with_overlap(text, max_words=250, overlap=50):
+    words = word_tokenize(text)
     chunks = []
-    current_chunk = ""
-    current_length = 0
+    start = 0
 
-    for sentence in sentences:
-        word_count = len(sentence.split())
-        if current_length + word_count <= max_words:
-            current_chunk += " " + sentence
-            current_length += word_count
-        else:
-            chunks.append(current_chunk.strip())
-            current_chunk = sentence
-            current_length = word_count
-    if current_chunk:
-        chunks.append(current_chunk.strip())
+    while start < len(words):
+        end = min(start + max_words, len(words))
+        chunk_words = words[start:end]
+        chunk = ' '.join(chunk_words)
+        chunks.append(chunk)
+        start += max_words - overlap
 
     return chunks
 
 def process_transcripts():
     print("Starting to process transcripts...\n")
-
     docs = list(source_collection.find())
+
     if not docs:
         print("No documents found in 'transcripts' collection.")
         return
@@ -46,25 +47,22 @@ def process_transcripts():
         file_name = doc.get("file_name")
         text = doc.get("transcription")
 
-        if not text:
+        if not text or len(text.strip().split()) < 10:
+            print(f"Skipping {file_name} — transcription is too short.")
             continue
 
         print(f"Found transcript for file: {file_name}")
+        chunks = chunk_text_with_overlap(text)
 
-        if len(text.split()) < 5:
-            print("Skipping — transcription is too short.\n")
-            continue
-
-        chunks = chunk_text(text)
-        print(f"Chunked into {len(chunks)} pieces.")
-
+        print(f"Chunked into {len(chunks)} overlapping segments.")
         inserted = 0
-        for idx, chunk in enumerate(chunks):
-            chunk_id = f"{file_name}_{idx}"
 
-            # Check if chunk already exists
+        for idx, chunk in enumerate(chunks):
+            chunk_id = generate_chunk_id(chunk, file_name, idx)
+
+            # Avoid duplicates
             if chunk_collection.find_one({"chunk_id": chunk_id}):
-                continue  # skip if already exists
+                continue
 
             chunk_doc = {
                 "chunk_id": chunk_id,
@@ -75,10 +73,9 @@ def process_transcripts():
             chunk_collection.insert_one(chunk_doc)
             inserted += 1
 
-        print(f"Inserted {inserted} new chunks for {file_name}.\n")
+        print(f"Inserted {inserted} chunks for {file_name}.\n")
 
     print("Done processing all transcripts.")
 
 if __name__ == "__main__":
-    nltk.download('punkt')  # ensure tokenizer is available
     process_transcripts()
